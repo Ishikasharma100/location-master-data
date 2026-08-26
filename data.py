@@ -1,4 +1,5 @@
 import pandas as pd
+import re
 from rapidfuzz import process, fuzz
 
 
@@ -14,7 +15,7 @@ MASTER_OUTPUT = "master_priority_updated.csv"
 
 
 # ============================================================
-# READ
+# READ FILES
 # ============================================================
 
 print("Reading files...")
@@ -34,7 +35,31 @@ print("Master Priority :", len(master_df))
 
 
 # ============================================================
-# NORMALIZE
+# CHECK REQUIRED COLUMNS
+# ============================================================
+
+required_location_columns = [
+    "id",
+    "parent_id",
+    "location_level",
+    "location_type",
+    "name"
+]
+
+for col in required_location_columns:
+    if col not in location_df.columns:
+        raise ValueError(
+            f"location_master.csv mein '{col}' column missing hai."
+        )
+
+if "city" not in master_df.columns:
+    raise ValueError(
+        "master_priority.csv mein 'city' column missing hai."
+    )
+
+
+# ============================================================
+# NORMALIZE TEXT
 # ============================================================
 
 def normalize(value):
@@ -44,41 +69,28 @@ def normalize(value):
 
     text = str(value).strip().casefold()
 
+    text = re.sub(r"\s+", " ", text)
+
     replacements = {
+
         "banglore": "bangalore",
         "bengaluru": "bangalore",
+        "bangalore": "bangalore",
+
         "bombay": "mumbai",
         "calcutta": "kolkata",
-        "madras": "chennai"
+        "madras": "chennai",
+
+        "new delhi": "delhi",
+
+        "gurgaon": "gurugram",
+
+        "mysore": "mysuru",
+
+        "ooty": "ooty"
     }
 
     return replacements.get(text, text)
-
-
-# ============================================================
-# CHECK COLUMNS
-# ============================================================
-
-required_location = [
-    "id",
-    "parent_id",
-    "location_level",
-    "location_type",
-    "name"
-]
-
-for col in required_location:
-
-    if col not in location_df.columns:
-        raise ValueError(
-            f"location_master.csv mein '{col}' nahi hai."
-        )
-
-
-if "city" not in master_df.columns:
-    raise ValueError(
-        "master_priority.csv mein 'city' column nahi hai."
-    )
 
 
 # ============================================================
@@ -91,48 +103,47 @@ CITY = 3
 
 
 # ============================================================
-# CLEAN LOCATION DATA
+# CLEAN LOCATION MASTER
 # ============================================================
 
 location_df["_name_clean"] = (
     location_df["name"].apply(normalize)
 )
 
-
-states = location_df[
-    location_df["location_level"] == STATE
-].copy()
-
-cities = location_df[
-    location_df["location_level"] == CITY
-].copy()
-
-
-print("\nLocation levels:")
-print(
-    "Countries :",
-    len(
-        location_df[
-            location_df["location_level"] == COUNTRY
-        ]
-    )
+location_df["_id_clean"] = pd.to_numeric(
+    location_df["id"],
+    errors="coerce"
 )
 
-print("States    :", len(states))
-print("Cities    :", len(cities))
+location_df["_parent_clean"] = pd.to_numeric(
+    location_df["parent_id"],
+    errors="coerce"
+)
+
+location_df["_level_clean"] = pd.to_numeric(
+    location_df["location_level"],
+    errors="coerce"
+)
 
 
 # ============================================================
-# STATE LOOKUP
-#
-# state name -> state id
+# STATES
 # ============================================================
+
+states = location_df[
+    location_df["_level_clean"] == STATE
+].copy()
 
 state_lookup = {}
 
 for _, row in states.iterrows():
 
-    state_name = normalize(row["name"])
+    if pd.isna(row["_id_clean"]):
+        continue
+
+    state_name = normalize(
+        row["name"]
+    )
 
     if not state_name:
         continue
@@ -140,68 +151,105 @@ for _, row in states.iterrows():
     state_lookup.setdefault(
         state_name,
         []
-    ).append(row["id"])
+    ).append(
+        int(row["_id_clean"])
+    )
 
 
 # ============================================================
-# CITY LOOKUP
-#
-# city name + parent state id -> city id
+# CITIES
 # ============================================================
+
+cities = location_df[
+    location_df["_level_clean"] == CITY
+].copy()
+
+print("\nLocation levels:")
+
+print(
+    "Countries :",
+    (location_df["_level_clean"] == COUNTRY).sum()
+)
+
+print(
+    "States    :",
+    len(states)
+)
+
+print(
+    "Cities    :",
+    len(cities)
+)
+
+
+# ============================================================
+# CITY LOOKUPS
+# ============================================================
+
+city_lookup = {}
 
 city_state_lookup = {}
 
 for _, row in cities.iterrows():
 
-    city_name = normalize(row["name"])
-
-    if not city_name:
+    if pd.isna(row["_id_clean"]):
         continue
 
-    key = (
-        city_name,
-        str(row["parent_id"])
+    city_name = normalize(
+        row["name"]
     )
 
-    # Keep first existing location only
-    if key not in city_state_lookup:
-
-        city_state_lookup[key] = {
-            "id": row["id"],
-            "name": row["name"]
-        }
-
-
-# ============================================================
-# CITY ONLY LOOKUP
-# ============================================================
-
-city_only_lookup = {}
-
-for _, row in cities.iterrows():
-
-    city_name = normalize(row["name"])
-
     if not city_name:
         continue
 
-    city_only_lookup.setdefault(
+    city_id = int(
+        row["_id_clean"]
+    )
+
+    parent_id = row["_parent_clean"]
+
+    if pd.isna(parent_id):
+        parent_id = None
+    else:
+        parent_id = int(parent_id)
+
+    record = {
+        "id": city_id,
+        "name": str(row["name"]).strip(),
+        "parent_id": parent_id
+    }
+
+    city_lookup.setdefault(
         city_name,
         []
-    ).append({
-        "id": row["id"],
-        "name": row["name"],
-        "parent_id": row["parent_id"]
-    })
+    ).append(
+        record
+    )
+
+    if parent_id is not None:
+
+        city_state_lookup[
+            (
+                city_name,
+                parent_id
+            )
+        ] = record
+
+
+city_names = list(
+    city_lookup.keys()
+)
 
 
 # ============================================================
-# GET STATE ID
+# STATE RESOLVER
 # ============================================================
 
-def get_state_id(state_name):
+def resolve_state(state_value):
 
-    state_clean = normalize(state_name)
+    state_clean = normalize(
+        state_value
+    )
 
     if not state_clean:
         return None
@@ -214,277 +262,419 @@ def get_state_id(state_name):
     if len(candidates) == 1:
         return candidates[0]
 
+    # Fuzzy state match
+    if not candidates:
+
+        match = process.extractOne(
+            state_clean,
+            list(state_lookup.keys()),
+            scorer=fuzz.ratio
+        )
+
+        if match:
+
+            matched_name, score, _ = match
+
+            if score >= 90:
+
+                ids = state_lookup[
+                    matched_name
+                ]
+
+                if len(ids) == 1:
+                    return ids[0]
+
     return None
 
 
 # ============================================================
-# BUILD CITY -> STATES FROM MASTER PRIORITY
+# CITY -> STATE MAP
+# ============================================================
+
+city_parent_map = {}
+
+for city_name, records in city_lookup.items():
+
+    parents = set()
+
+    for record in records:
+
+        if record["parent_id"] is not None:
+            parents.add(
+                record["parent_id"]
+            )
+
+    city_parent_map[
+        city_name
+    ] = parents
+
+
+# ============================================================
+# RESOLVE EXISTING CITY
 #
-# IMPORTANT:
-# We inspect ALL rows of a city.
-# We do NOT take only the first row.
+# This handles:
+#
+# Gurugram + blank state
+# Gurgaon  + blank state
+#
+# when both point to the same parent state.
 # ============================================================
 
-print("\nReading city/state combinations...")
+def resolve_existing_city(
+    city_value,
+    state_value
+):
 
-
-master_city_state = (
-    master_df[
-        ["city", "state"]
-    ]
-    .copy()
-)
-
-
-master_city_state["_city_clean"] = (
-    master_city_state["city"].apply(normalize)
-)
-
-master_city_state["_state_clean"] = (
-    master_city_state["state"].apply(normalize)
-)
-
-
-# Remove blank city
-master_city_state = master_city_state[
-    master_city_state["_city_clean"] != ""
-]
-
-
-city_state_pairs = (
-    master_city_state[
-        [
-            "_city_clean",
-            "_state_clean"
-        ]
-    ]
-    .drop_duplicates()
-)
-
-
-print(
-    "Unique city/state combinations :",
-    len(city_state_pairs)
-)
-
-
-# ============================================================
-# MATCH CACHE
-# ============================================================
-
-match_cache = {}
-
-new_locations = []
-
-
-# ============================================================
-# MATCH EACH CITY + STATE
-# ============================================================
-
-print("\nMatching city + state...")
-
-
-for index, pair in city_state_pairs.iterrows():
-
-    city_clean = pair["_city_clean"]
-    state_clean = pair["_state_clean"]
-
-
-    # --------------------------------------------------------
-    # STATE ID
-    # --------------------------------------------------------
-
-    state_candidates = state_lookup.get(
-        state_clean,
-        []
+    city_clean = normalize(
+        city_value
     )
 
-    state_id = None
+    if not city_clean:
+        return None
 
-    if len(state_candidates) == 1:
+    state_clean = normalize(
+        state_value
+    )
 
-        state_id = state_candidates[0]
-
-
-    # --------------------------------------------------------
-    # EXACT CITY + STATE
-    # --------------------------------------------------------
-
-    location = None
-
-    if state_id is not None:
-
-        location = city_state_lookup.get(
-            (
-                city_clean,
-                str(state_id)
-            )
-        )
-
-
-    if location is not None:
-
-        match_cache[
-            (
-                city_clean,
-                state_clean
-            )
-        ] = (
-            location["id"],
-            location["name"],
-            "EXACT_CITY_STATE"
-        )
-
-        continue
-
-
-    # --------------------------------------------------------
-    # CITY EXISTS BUT STATE NOT RESOLVED
-    #
-    # DO NOT CREATE DUPLICATE.
-    # --------------------------------------------------------
-
-    city_candidates = city_only_lookup.get(
+    candidates = city_lookup.get(
         city_clean,
         []
     )
 
-
-    if state_id is None:
-
-        # If there is exactly one city with this name,
-        # use it rather than creating duplicate.
-        if len(city_candidates) == 1:
-
-            location = city_candidates[0]
-
-            match_cache[
-                (
-                    city_clean,
-                    state_clean
-                )
-            ] = (
-                location["id"],
-                location["name"],
-                "EXACT_CITY"
-            )
-
-            continue
-
+    if not candidates:
+        return None
 
     # --------------------------------------------------------
-    # CITY EXISTS WITH DIFFERENT/UNKNOWN PARENT
+    # STATE IS KNOWN
+    # --------------------------------------------------------
+
+    if state_clean:
+
+        state_id = resolve_state(
+            state_value
+        )
+
+        if state_id is None:
+            return None
+
+        same_state = [
+            x
+            for x in candidates
+            if x["parent_id"] == state_id
+        ]
+
+        if len(same_state) == 1:
+            return same_state[0]["id"]
+
+        return None
+
+    # --------------------------------------------------------
+    # STATE IS BLANK
+    #
+    # If all candidate city records belong to the same state,
+    # safely reuse the city ID.
+    # --------------------------------------------------------
+
+    parent_ids = {
+        x["parent_id"]
+        for x in candidates
+        if x["parent_id"] is not None
+    }
+
+    if len(parent_ids) != 1:
+        return None
+
+    # Prefer exact spelling from source/master
+    # e.g. Gurugram over Gurgaon.
+    exact_name = [
+        x
+        for x in candidates
+        if x["name"].strip().casefold()
+        == str(city_value).strip().casefold()
+    ]
+
+    if len(exact_name) == 1:
+        return exact_name[0]["id"]
+
+    # Otherwise use first safe candidate
+    return candidates[0]["id"]
+
+
+# ============================================================
+# CITY MATCH FUNCTION
+# ============================================================
+
+def match_city(
+    city_value,
+    state_value
+):
+
+    city_clean = normalize(
+        city_value
+    )
+
+    if not city_clean:
+
+        return (
+            None,
+            None,
+            "BLANK_CITY"
+        )
+
+    # --------------------------------------------------------
+    # RESOLVE STATE
+    # --------------------------------------------------------
+
+    state_id = resolve_state(
+        state_value
+    )
+
+    # --------------------------------------------------------
+    # 1. EXACT CITY + STATE
     # --------------------------------------------------------
 
     if state_id is not None:
 
-        same_state = []
+        exact = city_state_lookup.get(
+            (
+                city_clean,
+                state_id
+            )
+        )
 
-        for candidate in city_candidates:
+        if exact:
 
-            if str(
-                candidate["parent_id"]
-            ) == str(state_id):
-
-                same_state.append(
-                    candidate
-                )
-
-
-        if len(same_state) == 1:
-
-            location = same_state[0]
-
-            match_cache[
-                (
-                    city_clean,
-                    state_clean
-                )
-            ] = (
-                location["id"],
-                location["name"],
+            return (
+                exact["id"],
+                exact["name"],
                 "EXACT_CITY_STATE"
             )
 
-            continue
-
-
     # --------------------------------------------------------
-    # DO NOT DO LOOSE FUZZY MATCH
+    # 2. EXACT CITY ONLY
     #
-    # First exact matching must be correct.
+    # Safe only when one unique city exists.
     # --------------------------------------------------------
 
-    match_cache[
-        (
-            city_clean,
-            state_clean
+    candidates = city_lookup.get(
+        city_clean,
+        []
+    )
+
+    if len(candidates) == 1:
+
+        record = candidates[0]
+
+        return (
+            record["id"],
+            record["name"],
+            "EXACT_CITY"
         )
-    ] = (
+
+    # --------------------------------------------------------
+    # 3. SAME CITY + STATE
+    # --------------------------------------------------------
+
+    if state_id is not None:
+
+        same_state = [
+            x
+            for x in candidates
+            if x["parent_id"] == state_id
+        ]
+
+        if len(same_state) == 1:
+
+            record = same_state[0]
+
+            return (
+                record["id"],
+                record["name"],
+                "EXACT_CITY_STATE"
+            )
+
+    # --------------------------------------------------------
+    # 4. SAFE REUSE
+    #
+    # Important for:
+    # Gurugram/Gurgaon
+    # Panaji + blank state
+    # etc.
+    # --------------------------------------------------------
+
+    reuse_id = resolve_existing_city(
+        city_value,
+        state_value
+    )
+
+    if reuse_id is not None:
+
+        reuse_records = [
+            x
+            for x in candidates
+            if x["id"] == reuse_id
+        ]
+
+        if reuse_records:
+
+            record = reuse_records[0]
+
+            return (
+                record["id"],
+                record["name"],
+                "REUSED_CITY"
+            )
+
+    # --------------------------------------------------------
+    # 5. FUZZY CITY MATCH
+    # --------------------------------------------------------
+
+    fuzzy = process.extractOne(
+        city_clean,
+        city_names,
+        scorer=fuzz.ratio
+    )
+
+    if fuzzy:
+
+        matched_city, score, _ = fuzzy
+
+        if score >= 92:
+
+            fuzzy_candidates = city_lookup[
+                matched_city
+            ]
+
+            if state_id is not None:
+
+                same_state = [
+                    x
+                    for x in fuzzy_candidates
+                    if x["parent_id"] == state_id
+                ]
+
+                if len(same_state) == 1:
+
+                    record = same_state[0]
+
+                    return (
+                        record["id"],
+                        record["name"],
+                        "SPELLING_MATCH"
+                    )
+
+            if len(fuzzy_candidates) == 1:
+
+                record = fuzzy_candidates[0]
+
+                return (
+                    record["id"],
+                    record["name"],
+                    "SPELLING_MATCH"
+                )
+
+    # --------------------------------------------------------
+    # 6. NOT FOUND
+    # --------------------------------------------------------
+
+    return (
         None,
         None,
         "NOT_FOUND"
     )
 
 
-    # --------------------------------------------------------
-    # SAVE NEW LOCATION CANDIDATE
-    # --------------------------------------------------------
-
-    if state_id is not None:
-
-        new_locations.append({
-            "city_clean": city_clean,
-            "state_clean": state_clean,
-            "state_id": state_id
-        })
-
-
-    if index % 20 == 0:
-
-        print(
-            f"Processed city/state pairs: {index}"
-        )
-
-
-print(
-    "\nMatching completed."
-)
-
-
 # ============================================================
-# REMOVE DUPLICATE NEW LOCATION CANDIDATES
+# MATCH MASTER PRIORITY
 # ============================================================
 
-unique_new_locations = []
+print("\nMatching Master Priority...")
 
-seen_new = set()
+location_ids = []
+matched_names = []
+match_statuses = []
 
+total = len(master_df)
 
-for item in new_locations:
+for i, (_, row) in enumerate(
+    master_df.iterrows(),
+    start=1
+):
 
-    key = (
-        item["city_clean"],
-        str(item["state_id"])
+    city = row.get(
+        "city",
+        ""
     )
 
-    if key not in seen_new:
+    state = row.get(
+        "state",
+        ""
+    )
 
-        seen_new.add(key)
+    location_id, matched_name, status = (
+        match_city(
+            city,
+            state
+        )
+    )
 
-        unique_new_locations.append(
-            item
+    location_ids.append(
+        location_id
+    )
+
+    matched_names.append(
+        matched_name
+    )
+
+    match_statuses.append(
+        status
+    )
+
+    if i % 10000 == 0:
+
+        print(
+            f"Processed: {i}/{total}"
         )
 
 
-print(
-    "New location candidates :",
-    len(unique_new_locations)
+# ============================================================
+# ADD MATCH RESULT
+# ============================================================
+
+master_df["location_id"] = location_ids
+
+master_df["matched_location_name"] = (
+    matched_names
+)
+
+master_df["location_match_status"] = (
+    match_statuses
 )
 
 
 # ============================================================
-# NEXT ID
+# FIND GENUINELY MISSING CITIES
+# ============================================================
+
+missing = master_df[
+    (
+        master_df["location_match_status"]
+        == "NOT_FOUND"
+    )
+    &
+    (
+        master_df["city"].notna()
+    )
+].copy()
+
+print(
+    "\nGenuinely unmatched rows :",
+    len(missing)
+)
+
+
+# ============================================================
+# NEXT LOCATION ID
 # ============================================================
 
 numeric_ids = pd.to_numeric(
@@ -494,9 +684,10 @@ numeric_ids = pd.to_numeric(
 
 if numeric_ids.notna().any():
 
-    next_id = int(
-        numeric_ids.max()
-    ) + 1
+    next_id = (
+        int(numeric_ids.max())
+        + 1
+    )
 
 else:
 
@@ -504,180 +695,458 @@ else:
 
 
 # ============================================================
-# CREATE NEW LOCATIONS
+# NEW LOCATION CACHE
 # ============================================================
 
 new_rows = []
 
-
-for item in unique_new_locations:
-
-    city_clean = item["city_clean"]
-    state_id = item["state_id"]
+new_location_cache = {}
 
 
-    # Check AGAIN before creating.
-    # Safety against duplicates.
+# ============================================================
+# PROCESS GENUINELY MISSING CITIES
+# ============================================================
+
+missing_pairs = (
+    missing[
+        [
+            "city",
+            "state"
+        ]
+    ]
+    .drop_duplicates()
+)
+
+
+for _, row in missing_pairs.iterrows():
+
+    city_value = row["city"]
+    state_value = row["state"]
+
+    city_clean = normalize(
+        city_value
+    )
+
+    state_clean = normalize(
+        state_value
+    )
+
+    if not city_clean:
+        continue
+
+    # --------------------------------------------------------
+    # RESOLVE STATE
+    # --------------------------------------------------------
+
+    state_id = resolve_state(
+        state_value
+    )
+
+    # --------------------------------------------------------
+    # NO STATE
+    # --------------------------------------------------------
+
+    if state_id is None:
+
+        # Try to reuse an existing city safely.
+        reuse_id = resolve_existing_city(
+            city_value,
+            state_value
+        )
+
+        if reuse_id is not None:
+
+            records = [
+                x
+                for x in city_lookup.get(
+                    city_clean,
+                    []
+                )
+                if x["id"] == reuse_id
+            ]
+
+            if records:
+
+                record = records[0]
+
+                mask = (
+                    master_df["city"]
+                    .apply(normalize)
+                    == city_clean
+                )
+
+                # Only update rows where state is blank
+                blank_state_mask = (
+                    master_df["state"]
+                    .apply(normalize)
+                    == ""
+                )
+
+                final_mask = (
+                    mask
+                    & blank_state_mask
+                    & (
+                        master_df[
+                            "location_match_status"
+                        ]
+                        == "NOT_FOUND"
+                    )
+                )
+
+                master_df.loc[
+                    final_mask,
+                    "location_id"
+                ] = record["id"]
+
+                master_df.loc[
+                    final_mask,
+                    "matched_location_name"
+                ] = record["name"]
+
+                master_df.loc[
+                    final_mask,
+                    "location_match_status"
+                ] = "REUSED_CITY"
+
+                continue
+
+        print(
+            f"Cannot safely add: "
+            f"{city_value} "
+            f"(state not resolved)"
+        )
+
+        continue
+
+    cache_key = (
+        city_clean,
+        state_id
+    )
+
+    # --------------------------------------------------------
+    # ALREADY CREATED DURING THIS RUN
+    # --------------------------------------------------------
+
+    if cache_key in new_location_cache:
+
+        existing_id = new_location_cache[
+            cache_key
+        ]
+
+        mask = (
+            master_df["city"]
+            .apply(normalize)
+            == city_clean
+        )
+
+        state_mask = (
+            master_df["state"]
+            .apply(normalize)
+            == state_clean
+        )
+
+        final_mask = (
+            mask
+            & state_mask
+            & (
+                master_df[
+                    "location_match_status"
+                ]
+                == "NOT_FOUND"
+            )
+        )
+
+        master_df.loc[
+            final_mask,
+            "location_id"
+        ] = existing_id
+
+        master_df.loc[
+            final_mask,
+            "matched_location_name"
+        ] = str(
+            city_value
+        ).strip()
+
+        master_df.loc[
+            final_mask,
+            "location_match_status"
+        ] = "NEW_LOCATION"
+
+        continue
+
+    # --------------------------------------------------------
+    # DOUBLE CHECK EXISTING CITY
+    # --------------------------------------------------------
+
     existing = city_state_lookup.get(
         (
             city_clean,
-            str(state_id)
+            state_id
         )
     )
 
+    if existing:
 
-    if existing is not None:
-
-        match_cache[
-            (
-                city_clean,
-                item["state_clean"]
-            )
-        ] = (
-            existing["id"],
-            existing["name"],
-            "EXACT_CITY_STATE"
+        mask = (
+            master_df["city"]
+            .apply(normalize)
+            == city_clean
         )
 
+        state_mask = (
+            master_df["state"]
+            .apply(normalize)
+            == state_clean
+        )
+
+        final_mask = (
+            mask
+            & state_mask
+            & (
+                master_df[
+                    "location_match_status"
+                ]
+                == "NOT_FOUND"
+            )
+        )
+
+        master_df.loc[
+            final_mask,
+            "location_id"
+        ] = existing["id"]
+
+        master_df.loc[
+            final_mask,
+            "matched_location_name"
+        ] = existing["name"]
+
+        master_df.loc[
+            final_mask,
+            "location_match_status"
+        ] = "EXACT_CITY_STATE"
+
         continue
 
-
     # --------------------------------------------------------
-    # GET ORIGINAL CITY DISPLAY NAME
+    # CREATE NEW CITY
     # --------------------------------------------------------
-
-    matching_rows = master_df[
-        master_df["city"].apply(normalize)
-        == city_clean
-    ]
-
-    if len(matching_rows) == 0:
-        continue
 
     city_display = str(
-        matching_rows.iloc[0]["city"]
+        city_value
     ).strip()
-
-
-    # --------------------------------------------------------
-    # CREATE EMPTY ROW WITH SAME COLUMNS
-    # --------------------------------------------------------
 
     new_row = {}
 
     for column in location_df.columns:
 
-        if column != "_name_clean":
+        if column.startswith("_"):
+            continue
 
-            new_row[column] = None
-
+        new_row[column] = None
 
     new_row["id"] = next_id
     new_row["parent_id"] = state_id
     new_row["location_level"] = CITY
     new_row["location_type"] = "City"
     new_row["name"] = city_display
-    new_row["short_name"] = city_display
-    new_row["status"] = "active"
 
+    if "short_name" in location_df.columns:
+        new_row["short_name"] = city_display
+
+    if "status" in location_df.columns:
+        new_row["status"] = "active"
 
     new_rows.append(
         new_row
     )
 
+    new_location_cache[
+        cache_key
+    ] = next_id
 
-    # Add immediately to cache
-    match_cache[
-        (
-            city_clean,
-            item["state_clean"]
-        )
-    ] = (
-        next_id,
-        city_display,
-        "NEW_LOCATION"
+    # Add immediately to lookup
+    new_record = {
+        "id": next_id,
+        "name": city_display,
+        "parent_id": state_id
+    }
+
+    city_lookup.setdefault(
+        city_clean,
+        []
+    ).append(
+        new_record
     )
 
+    city_state_lookup[
+        (
+            city_clean,
+            state_id
+        )
+    ] = new_record
+
+    # --------------------------------------------------------
+    # UPDATE MASTER
+    # --------------------------------------------------------
+
+    mask = (
+        master_df["city"]
+        .apply(normalize)
+        == city_clean
+    )
+
+    state_mask = (
+        master_df["state"]
+        .apply(normalize)
+        == state_clean
+    )
+
+    final_mask = (
+        mask
+        & state_mask
+        & (
+            master_df[
+                "location_match_status"
+            ]
+            == "NOT_FOUND"
+        )
+    )
+
+    master_df.loc[
+        final_mask,
+        "location_id"
+    ] = next_id
+
+    master_df.loc[
+        final_mask,
+        "matched_location_name"
+    ] = city_display
+
+    master_df.loc[
+        final_mask,
+        "location_match_status"
+    ] = "NEW_LOCATION"
 
     print(
         f"NEW LOCATION: "
         f"{city_display} "
-        f"-> {next_id} "
-        f"({item['state_clean']})"
+        f"-> ID {next_id} "
+        f"({state_clean})"
     )
-
 
     next_id += 1
 
 
 # ============================================================
-# UPDATE MASTER PRIORITY
+# FINAL SAFETY PASS
+#
+# Resolve remaining blank-state cities if they have exactly
+# one safe existing city location.
 # ============================================================
 
-print("\nApplying results to Master Priority...")
+remaining = master_df[
+    (
+        master_df["location_match_status"]
+        == "NOT_FOUND"
+    )
+    &
+    (
+        master_df["city"].notna()
+    )
+].copy()
 
 
-def resolve_master_row(row):
+for idx, row in remaining.iterrows():
+
+    city = row.get(
+        "city",
+        ""
+    )
+
+    state = row.get(
+        "state",
+        ""
+    )
+
+    reuse_id = resolve_existing_city(
+        city,
+        state
+    )
+
+    if reuse_id is None:
+        continue
 
     city_clean = normalize(
-        row["city"]
+        city
     )
 
-    state_clean = ""
-
-    if "state" in row.index:
-
-        state_clean = normalize(
-            row["state"]
-        )
-
-
-    return match_cache.get(
-        (
+    records = [
+        x
+        for x in city_lookup.get(
             city_clean,
-            state_clean
-        ),
-        (
-            None,
-            None,
-            "NOT_FOUND"
+            []
         )
+        if x["id"] == reuse_id
+    ]
+
+    if not records:
+        continue
+
+    record = records[0]
+
+    master_df.at[
+        idx,
+        "location_id"
+    ] = record["id"]
+
+    master_df.at[
+        idx,
+        "matched_location_name"
+    ] = record["name"]
+
+    master_df.at[
+        idx,
+        "location_match_status"
+    ] = "REUSED_CITY"
+
+
+# ============================================================
+# BUILD UPDATED LOCATION MASTER
+# ============================================================
+
+updated_location_df = (
+    location_df
+    .drop(
+        columns=[
+            "_name_clean",
+            "_id_clean",
+            "_parent_clean",
+            "_level_clean"
+        ],
+        errors="ignore"
     )
-
-
-results = master_df.apply(
-    resolve_master_row,
-    axis=1
+    .copy()
 )
-
-
-master_df["location_id"] = results.apply(
-    lambda x: x[0]
-)
-
-master_df["matched_location_name"] = results.apply(
-    lambda x: x[1]
-)
-
-master_df["location_match_status"] = results.apply(
-    lambda x: x[2]
-)
-
-
-# ============================================================
-# UPDATED LOCATION MASTER
-# ============================================================
-
-updated_location_df = location_df.drop(
-    columns=["_name_clean"],
-    errors="ignore"
-).copy()
 
 
 if new_rows:
 
     new_location_df = pd.DataFrame(
         new_rows
+    )
+
+    # Ensure same columns
+    for column in updated_location_df.columns:
+
+        if column not in new_location_df.columns:
+
+            new_location_df[column] = None
+
+    new_location_df = (
+        new_location_df[
+            updated_location_df.columns
+        ]
     )
 
     updated_location_df = pd.concat(
@@ -690,11 +1159,10 @@ if new_rows:
 
 
 # ============================================================
-# SAVE
+# SAVE OUTPUT
 # ============================================================
 
 print("\nSaving output files...")
-
 
 updated_location_df.to_csv(
     LOCATION_OUTPUT,
@@ -710,7 +1178,7 @@ master_df.to_csv(
 
 
 # ============================================================
-# REPORT
+# FINAL REPORT
 # ============================================================
 
 print("\n")
@@ -729,37 +1197,78 @@ print(
 )
 
 print(
-    "Master Priority          :",
+    "Master Priority rows     :",
     len(master_df)
 )
 
 print(
-    "Exact city-state matches :",
+    "Exact City + State       :",
     (
-        master_df["location_match_status"]
+        master_df[
+            "location_match_status"
+        ]
         == "EXACT_CITY_STATE"
     ).sum()
 )
 
 print(
-    "Exact city matches       :",
+    "Exact City               :",
     (
-        master_df["location_match_status"]
+        master_df[
+            "location_match_status"
+        ]
         == "EXACT_CITY"
     ).sum()
 )
 
 print(
-    "New locations            :",
+    "Spelling Matches         :",
     (
-        master_df["location_match_status"]
+        master_df[
+            "location_match_status"
+        ]
+        == "SPELLING_MATCH"
+    ).sum()
+)
+
+print(
+    "Reused City              :",
+    (
+        master_df[
+            "location_match_status"
+        ]
+        == "REUSED_CITY"
+    ).sum()
+)
+
+print(
+    "New Locations            :",
+    (
+        master_df[
+            "location_match_status"
+        ]
         == "NEW_LOCATION"
     ).sum()
 )
 
 print(
-    "Still unmatched          :",
-    master_df["location_id"].isna().sum()
+    "Blank City               :",
+    (
+        master_df[
+            "location_match_status"
+        ]
+        == "BLANK_CITY"
+    ).sum()
+)
+
+print(
+    "Still Unmatched          :",
+    (
+        master_df[
+            "location_match_status"
+        ]
+        == "NOT_FOUND"
+    ).sum()
 )
 
 print("\nCreated ONLY:")
