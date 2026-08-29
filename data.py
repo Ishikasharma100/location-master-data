@@ -59,7 +59,7 @@ if "city" not in master_df.columns:
 
 
 # ============================================================
-# NORMALIZE TEXT
+# NORMALIZE TEXT & HANDLE ALIASES
 # ============================================================
 
 def normalize(value):
@@ -72,21 +72,36 @@ def normalize(value):
     text = re.sub(r"\s+", " ", text)
 
     replacements = {
-
+        "up": "uttar pradesh",
+        "mp": "madhya pradesh",
+        "mh": "maharashtra",
+        "maha": "maharashtra",
+        "ap": "andhra pradesh",
+        "tn": "tamil nadu",
+        "wb": "west bengal",
+        "hp": "himachal pradesh",
+        "jk": "jammu and kashmir",
+        "j&k": "jammu and kashmir",
+        "uk": "uttarakhand",
+        "cg": "chhattisgarh",
+        "rj": "rajasthan",
+        "raj": "rajasthan",
+        "gj": "gujarat",
+        "guj": "gujarat",
+        "kr": "karnataka",
+        "kl": "kerala",
+        "mum": "mumbai",
+        "bom": "mumbai",
+        "bombay": "mumbai",
         "banglore": "bangalore",
         "bengaluru": "bangalore",
         "bangalore": "bangalore",
-
-        "bombay": "mumbai",
         "calcutta": "kolkata",
         "madras": "chennai",
-
         "new delhi": "delhi",
-
+        "del": "delhi",
         "gurgaon": "gurugram",
-
         "mysore": "mysuru",
-
         "ooty": "ooty"
     }
 
@@ -311,13 +326,6 @@ for city_name, records in city_lookup.items():
 
 # ============================================================
 # RESOLVE EXISTING CITY
-#
-# This handles:
-#
-# Gurugram + blank state
-# Gurgaon  + blank state
-#
-# when both point to the same parent state.
 # ============================================================
 
 def resolve_existing_city(
@@ -370,9 +378,6 @@ def resolve_existing_city(
 
     # --------------------------------------------------------
     # STATE IS BLANK
-    #
-    # If all candidate city records belong to the same state,
-    # safely reuse the city ID.
     # --------------------------------------------------------
 
     parent_ids = {
@@ -384,8 +389,6 @@ def resolve_existing_city(
     if len(parent_ids) != 1:
         return None
 
-    # Prefer exact spelling from source/master
-    # e.g. Gurugram over Gurgaon.
     exact_name = [
         x
         for x in candidates
@@ -396,7 +399,6 @@ def resolve_existing_city(
     if len(exact_name) == 1:
         return exact_name[0]["id"]
 
-    # Otherwise use first safe candidate
     return candidates[0]["id"]
 
 
@@ -452,8 +454,6 @@ def match_city(
 
     # --------------------------------------------------------
     # 2. EXACT CITY ONLY
-    #
-    # Safe only when one unique city exists.
     # --------------------------------------------------------
 
     candidates = city_lookup.get(
@@ -495,11 +495,6 @@ def match_city(
 
     # --------------------------------------------------------
     # 4. SAFE REUSE
-    #
-    # Important for:
-    # Gurugram/Gurgaon
-    # Panaji + blank state
-    # etc.
     # --------------------------------------------------------
 
     reuse_id = resolve_existing_city(
@@ -582,6 +577,66 @@ def match_city(
         None,
         "NOT_FOUND"
     )
+
+# ============================================================
+# NEW PROCESS: ADD MISSING STATES TO LOCATION MASTER
+# ============================================================
+
+print("\nChecking for missing States...")
+
+# Sirf naye states ke liye temporarily Next ID nikalna
+temp_ids = pd.to_numeric(location_df["id"], errors="coerce")
+current_next_id = int(temp_ids.max()) + 1 if temp_ids.notna().any() else 1
+
+unique_states = master_df["state"].dropna().unique()
+new_states_list = []
+missing_states_count = 0
+
+for state_value in unique_states:
+    state_clean = normalize(state_value)
+    if not state_clean:
+        continue
+        
+    state_id = resolve_state(state_value)
+    
+    # Agar state exist nahi karti hai
+    if state_id is None:
+        state_display = str(state_value).strip()
+        
+        # Nayi state ka structure banana
+        new_state_row = {col: None for col in location_df.columns if not col.startswith("_")}
+        new_state_row["id"] = current_next_id
+        new_state_row["parent_id"] = COUNTRY
+        new_state_row["location_level"] = STATE
+        new_state_row["location_type"] = "State"
+        new_state_row["name"] = state_display
+        
+        if "short_name" in location_df.columns:
+            new_state_row["short_name"] = state_display
+        if "status" in location_df.columns:
+            new_state_row["status"] = "Active"
+            
+        new_states_list.append(new_state_row)
+        
+        # In-memory dictionary update karna taaki cities match ho sakein
+        state_lookup.setdefault(state_clean, []).append(current_next_id)
+        
+        print(f"NEW STATE ADDED: {state_display} -> ID {current_next_id}")
+        current_next_id += 1
+        missing_states_count += 1
+
+# Agar nayi states mili hain, toh unhe turant location_df mein add kar do
+if new_states_list:
+    new_states_df = pd.DataFrame(new_states_list)
+    
+    new_states_df["_name_clean"] = new_states_df["name"].apply(normalize)
+    new_states_df["_id_clean"] = pd.to_numeric(new_states_df["id"], errors="coerce")
+    new_states_df["_parent_clean"] = pd.to_numeric(new_states_df["parent_id"], errors="coerce")
+    new_states_df["_level_clean"] = pd.to_numeric(new_states_df["location_level"], errors="coerce")
+    
+    location_df = pd.concat([location_df, new_states_df], ignore_index=True)
+
+print(f"Total new states integrated: {missing_states_count}")
 
 
 # ============================================================
@@ -1188,7 +1243,7 @@ print("=" * 60)
 
 print(
     "Original Location Master :",
-    len(location_df)
+    len(location_df) - missing_states_count
 )
 
 print(
